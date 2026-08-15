@@ -18,17 +18,21 @@ from xml.dom import minidom
 import xml.etree.ElementTree as ET
 
 import dateutil.tz
-from lz4.frame import compress as lz_compress
-from lz4.frame import decompress as lz_decompress
 from numexpr import evaluate
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 from typing_extensions import Any, Buffer, overload, SupportsBytes, TypedDict, Unpack
-from zstd import compress as zstd_compress
-from zstd import decompress as zstd_decompress
 
 from .. import tool
 from . import v4_constants as v4c
+from .compression_utils import (
+    lz_compress,
+    lz_decompress,
+    zlib_compress,
+    zlib_decompress,
+    zstd_compress,
+    zstd_decompress,
+)
 from .cutils import bytes_dtype_size
 from .types import StrPath
 from .utils import (
@@ -49,23 +53,6 @@ from .utils import (
 
 COMPRESSION_LEVEL = 1
 AT_COMPRESSION_LEVEL = 9
-
-try:
-    from deflate import zlib_compress as compress
-    from deflate import zlib_decompress
-
-    def decompress(data, bufsize):
-        return zlib_decompress(data, originalsize=bufsize)
-
-except ImportError:
-    try:
-        from isal.isal_zlib import compress, decompress
-
-    except ImportError:
-        from zlib import (  # type: ignore[assignment, no-redef, unused-ignore]
-            compress,
-            decompress,
-        )
 
 try:
     from sympy import lambdify, symbols
@@ -286,9 +273,8 @@ class AttachmentBlock:
                 if compression:
                     match compression_type:
                         case "deflate":
-
                             flags |= v4c.FLAG_AT_COMPRESSED_EMBEDDED
-                            data = compress(data, AT_COMPRESSION_LEVEL)
+                            data = zlib_compress(data, AT_COMPRESSION_LEVEL)
                             embedded_size = len(data)
 
                             self.zip_type = v4c.AT_ZIP_TYPE_DEFLATE
@@ -344,7 +330,7 @@ class AttachmentBlock:
             if self.flags & v4c.FLAG_AT_COMPRESSED_EMBEDDED or self.flags & v4c.FLAG_AT_GENERAL_COMPRESSED_EMBEDDED:
                 match self.zip_type:
                     case v4c.AT_ZIP_TYPE_DEFLATE:
-                        data = typing.cast(bytes, decompress(self.embedded_data, bufsize=self.original_size))  # type: ignore[redundant-cast, unused-ignore]
+                        data = typing.cast(bytes, zlib_decompress(self.embedded_data, bufsize=self.original_size))  # type: ignore[redundant-cast, unused-ignore]
                     case v4c.AT_ZIP_TYPE_ZSTD:
                         data = typing.cast(bytes, zstd_decompress(self.embedded_data))  # type: ignore[redundant-cast, unused-ignore]
                     case v4c.AT_ZIP_TYPE_LZ4:
@@ -475,7 +461,8 @@ class AttachmentBlock:
         if self.flags & v4c.FLAG_AT_ZIP_MIME_TYPE_VALID:
             keys = (*keys, "mime_zip_addr")
 
-        keys = keys + (
+        keys = (
+            *keys,
             "flags",
             "creator_index",
             "zip_type",
@@ -1329,7 +1316,7 @@ class Channel:
                 else:
                     text = comment
         else:
-            text = comment
+            text = comment or ""
 
         if text in defined_texts:
             self.comment_addr = defined_texts[text]
@@ -1744,7 +1731,6 @@ class ChannelArrayBlock(_ChannelArrayBlockBase):
                         self[f"axis_conversion_{i}_addr"] = address
 
                         if address:
-
                             if address in cc_map:
                                 conv = cc_map[address]
                             else:
@@ -1865,7 +1851,6 @@ class ChannelArrayBlock(_ChannelArrayBlockBase):
                         self[f"axis_conversion_{i}_addr"] = address
 
                         if address:
-
                             if address in cc_map:
                                 conv = cc_map[address]
                             else:
@@ -2109,9 +2094,7 @@ class ChannelArrayBlock(_ChannelArrayBlockBase):
                     info["size"] = typing.cast(int, self[f"dim_size_{i}"])
 
                 case _:
-
                     if self.flags & v4c.FLAG_CA_FIXED_AXIS:
-
                         info["type"] = "FIXED_AXIS"
                         info["size"] = typing.cast(int, self[f"dim_size_{i}"])
                         info["values"] = [
@@ -2119,7 +2102,6 @@ class ChannelArrayBlock(_ChannelArrayBlockBase):
                         ]
 
                     else:
-
                         info["type"] = "REF_AXIS"
                         info["size"] = typing.cast(int, self[f"dim_size_{i}"])
                         info["ref"] = self.axis_channels[i]
@@ -2171,7 +2153,6 @@ class ChannelArrayBlock(_ChannelArrayBlockBase):
     ) -> int:
         if self.flags & v4c.FLAG_CA_AXIS:
             for i in range(self.dims):
-
                 conversion = self[f"axis_conversion_{i}"]
                 if conversion:
                     address = conversion.to_blocks(address, blocks, defined_texts, cc_map)
@@ -5103,7 +5084,7 @@ class DataZippedBlock:
 
             compress_func: Callable[[Buffer, int], bytes]
             if self.zip_type in (v4c.FLAG_DZ_DEFLATE, v4c.FLAG_DZ_TRANSPOSED_DEFLATE):
-                compress_func = compress
+                compress_func = zlib_compress
             elif self.zip_type in (v4c.FLAG_DZ_LZ4, v4c.FLAG_DZ_TRANSPOSED_LZ4):
                 compress_func = lz_compress
             elif self.zip_type in (v4c.FLAG_DZ_ZSTD, v4c.FLAG_DZ_TRANSPOSED_ZSTD):
@@ -5146,7 +5127,7 @@ class DataZippedBlock:
                 original_size = self.original_size
 
                 if self.zip_type in (v4c.FLAG_DZ_DEFLATE, v4c.FLAG_DZ_TRANSPOSED_DEFLATE):
-                    data = decompress(data, bufsize=original_size)
+                    data = zlib_decompress(data, bufsize=original_size)
 
                 elif self.zip_type in (v4c.FLAG_DZ_LZ4, v4c.FLAG_DZ_TRANSPOSED_LZ4):
                     data = lz_decompress(data)
@@ -6900,7 +6881,7 @@ class ListData(_ListDataBase):
 
                 address += self.links_nr * 8
 
-                self.flags, self.zip_info, self.zip_info_inval, self.flags_ext, self.self.data_block_nr = unpack_from(
+                self.flags, self.zip_info, self.zip_info_inval, self.flags_ext, self.data_block_nr = unpack_from(
                     "<4BI", stream, address
                 )
                 address += 8
@@ -6964,7 +6945,7 @@ class ListData(_ListDataBase):
 
                 links = unpack(f"<{self.links_nr}Q", stream.read(self.links_nr * 8))
 
-                self.flags, self.zip_info, self.zip_info_inval, self.flags_ext, self.self.data_block_nr = typing.cast(
+                self.flags, self.zip_info, self.zip_info_inval, self.flags_ext, self.data_block_nr = typing.cast(
                     tuple[int, int], unpack("<4BI", stream.read(8))
                 )
 

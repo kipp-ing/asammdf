@@ -23,6 +23,7 @@ import asammdf.mdf as mdf_module
 from ...blocks import v4_constants as v4c
 from ...blocks.conversion_utils import from_dict
 from ...blocks.utils import (
+    astype,
     csv_bytearray2hex,
     extract_xml_comment,
     load_can_database,
@@ -1366,7 +1367,7 @@ class WithMDIArea:
                     if not file_info:
                         continue
 
-                    file_index, file = file_info
+                    _file_index, file = file_info
 
                     selected_signals = file.mdf.to_dataframe(
                         channels=uuids_signals,
@@ -1401,7 +1402,7 @@ class WithMDIArea:
                     if not file_info:
                         continue
 
-                    file_index, file = file_info
+                    _file_index, file = file_info
 
                     selected_signals = file.mdf.select(
                         uuids_signals,
@@ -1457,7 +1458,7 @@ class WithMDIArea:
                     if not file_info:
                         continue
 
-                    file_index, file = file_info
+                    _file_index, file = file_info
 
                     for entry in uuids_entries:
                         if entry["name"] in file.mdf:
@@ -1651,8 +1652,8 @@ class WithMDIArea:
                             signal.flags |= signal.Flags.user_defined_conversion
 
                         if channel["flags"] & Signal.Flags.user_defined_name:
-                            sig.original_name = channel["name"]
-                            sig.name = channel.get("user_defined_name", "") or ""
+                            signal.original_name = channel["name"]
+                            signal.name = channel.get("user_defined_name", "") or ""
 
                             signal.flags |= signal.Flags.user_defined_name
 
@@ -1828,7 +1829,7 @@ class WithMDIArea:
                                     sys.intern(name)
 
                         if data.name == "CAN_DataFrame":
-                            vals = data["CAN_DataFrame.BusChannel"].astype("u1")
+                            vals = astype(data["CAN_DataFrame.BusChannel"], "u1")
 
                             vals = [f"CAN {chn}" for chn in vals.tolist()]
                             columns["Bus"] = vals
@@ -1839,7 +1840,7 @@ class WithMDIArea:
                                 columns["Name"] = [frame_map.get(_id, "") for _id in vals.tolist()]
 
                             if "CAN_DataFrame.IDE" in names:
-                                columns["IDE"] = data["CAN_DataFrame.IDE"].astype("u1")
+                                columns["IDE"] = astype(data["CAN_DataFrame.IDE"], "u1")
 
                             columns["DLC"] = data["CAN_DataFrame.DLC"].astype("u1")
                             data_length = data["CAN_DataFrame.DataLength"].astype("u1")
@@ -1858,29 +1859,30 @@ class WithMDIArea:
                                     ]
                                 else:
                                     columns["Direction"] = [
-                                        "Tx" if dir else "Rx" for dir in data["CAN_DataFrame.Dir"].astype("u1").tolist()
+                                        "Tx" if dir else "Rx"
+                                        for dir in astype(data["CAN_DataFrame.Dir"], "u1").tolist()
                                     ]
 
                             if "CAN_DataFrame.ESI" in names:
                                 columns["ESI"] = [
                                     "Error" if dir else "No error"
-                                    for dir in data["CAN_DataFrame.ESI"].astype("u1").tolist()
+                                    for dir in astype(data["CAN_DataFrame.ESI"], "u1").tolist()
                                 ]
 
                             if "CAN_DataFrame.EDL" in names:
                                 columns["EDL"] = [
                                     "CAN FD" if dir else "Standard CAN"
-                                    for dir in data["CAN_DataFrame.EDL"].astype("u1").tolist()
+                                    for dir in astype(data["CAN_DataFrame.EDL"], "u1").tolist()
                                 ]
 
                             if "CAN_DataFrame.BRS" in names:
-                                columns["BRS"] = [str(dir) for dir in data["CAN_DataFrame.BRS"].astype("u1").tolist()]
+                                columns["BRS"] = [str(dir) for dir in astype(data["CAN_DataFrame.BRS"], "u1").tolist()]
 
                             vals = None
                             data_length = None
 
                         elif data.name == "CAN_RemoteFrame":
-                            vals = data["CAN_RemoteFrame.BusChannel"].astype("u1")
+                            vals = astype(data["CAN_RemoteFrame.BusChannel"], "u1")
                             vals = [f"CAN {chn}" for chn in vals.tolist()]
                             columns["Bus"] = vals
 
@@ -1890,7 +1892,7 @@ class WithMDIArea:
                                 columns["Name"] = [frame_map.get(_id, "") for _id in vals.tolist()]
 
                             if "CAN_RemoteFrame.IDE" in names:
-                                columns["IDE"] = data["CAN_RemoteFrame.IDE"].astype("u1")
+                                columns["IDE"] = astype(data["CAN_RemoteFrame.IDE"], "u1")
 
                             columns["DLC"] = data["CAN_RemoteFrame.DLC"].astype("u1")
                             data_length = data["CAN_RemoteFrame.DataLength"].astype("u1")
@@ -1905,7 +1907,7 @@ class WithMDIArea:
                                 else:
                                     columns["Direction"] = [
                                         "Tx" if dir else "Rx"
-                                        for dir in data["CAN_RemoteFrame.Dir"].astype("u1").tolist()
+                                        for dir in astype(data["CAN_RemoteFrame.Dir"], "u1").tolist()
                                     ]
 
                             vals = None
@@ -1915,7 +1917,7 @@ class WithMDIArea:
                             names = set(data.samples.dtype.names)
 
                             if "CAN_ErrorFrame.BusChannel" in names:
-                                vals = data["CAN_ErrorFrame.BusChannel"].astype("u1")
+                                vals = astype(data["CAN_ErrorFrame.BusChannel"], "u1")
                                 vals = [f"CAN {chn}" for chn in vals.tolist()]
                                 columns["Bus"] = vals
 
@@ -1926,7 +1928,7 @@ class WithMDIArea:
                                     columns["Name"] = [frame_map.get(_id, "") for _id in vals.tolist()]
 
                             if "CAN_ErrorFrame.IDE" in names:
-                                columns["IDE"] = data["CAN_ErrorFrame.IDE"].astype("u1")
+                                columns["IDE"] = astype(data["CAN_ErrorFrame.IDE"], "u1")
 
                             if "CAN_ErrorFrame.DLC" in names:
                                 columns["DLC"] = data["CAN_ErrorFrame.DLC"].astype("u1")
@@ -1937,7 +1939,7 @@ class WithMDIArea:
                             columns["Event Type"] = "Error Frame"
 
                             if "CAN_ErrorFrame.ErrorType" in names:
-                                vals = data["CAN_ErrorFrame.ErrorType"].astype("u1").tolist()
+                                vals = astype(data["CAN_ErrorFrame.ErrorType"], "u1").tolist()
                                 vals = [v4c.CAN_ERROR_TYPES.get(err, "Other error") for err in vals]
 
                                 columns["Details"] = vals
@@ -1950,7 +1952,7 @@ class WithMDIArea:
                                 else:
                                     columns["Direction"] = [
                                         "Tx" if dir else "Rx"
-                                        for dir in data["CAN_ErrorFrame.Dir"].astype("u1").tolist()
+                                        for dir in astype(data["CAN_ErrorFrame.Dir"], "u1").tolist()
                                     ]
 
                         df = pd.DataFrame(columns, index=df_index)
@@ -2104,7 +2106,7 @@ class WithMDIArea:
                 if data.name == "FLX_Frame":
                     index = np.searchsorted(df_index, data.timestamps)
 
-                    vals = data["FLX_Frame.BusChannel"].astype("u1")
+                    vals = astype(data["FLX_Frame.BusChannel"], "u1")
                     vals = [f"FlexRay {chn}" for chn in vals.tolist()]
                     columns["Bus"][index] = vals
 
@@ -2112,7 +2114,7 @@ class WithMDIArea:
                         columns["Channel"][index] = [v.decode("utf-8") for v in data["FLX_Frame.FlxChannel"].tolist()]
                     else:
                         columns["Channel"][index] = [
-                            "B" if chn else "A" for chn in data["FLX_Frame.FlxChannel"].astype("u1").tolist()
+                            "B" if chn else "A" for chn in astype(data["FLX_Frame.FlxChannel"], "u1").tolist()
                         ]
 
                     vals = data["FLX_Frame.ID"].astype("u2")
@@ -2140,7 +2142,7 @@ class WithMDIArea:
                             columns["Direction"][index] = [v.decode("utf-8") for v in data["FLX_Frame.Dir"].tolist()]
                         else:
                             columns["Direction"][index] = [
-                                "Tx" if dir else "Rx" for dir in data["FLX_Frame.Dir"].astype("u1").tolist()
+                                "Tx" if dir else "Rx" for dir in astype(data["FLX_Frame.Dir"], "u1").tolist()
                             ]
 
                     vals = None
@@ -2149,7 +2151,7 @@ class WithMDIArea:
                 elif data.name == "FLX_NullFrame":
                     index = np.searchsorted(df_index, data.timestamps)
 
-                    vals = data["FLX_NullFrame.BusChannel"].astype("u1")
+                    vals = astype(data["FLX_NullFrame.BusChannel"], "u1")
                     vals = [f"FlexRay {chn}" for chn in vals.tolist()]
                     columns["Bus"][index] = vals
 
@@ -2159,7 +2161,7 @@ class WithMDIArea:
                         ]
                     else:
                         columns["Channel"][index] = [
-                            "B" if chn else "A" for chn in data["FLX_NullFrame.FlxChannel"].astype("u1").tolist()
+                            "B" if chn else "A" for chn in astype(data["FLX_NullFrame.FlxChannel"], "u1").tolist()
                         ]
 
                     vals = data["FLX_NullFrame.ID"].astype("u2")
@@ -2182,7 +2184,7 @@ class WithMDIArea:
                             ]
                         else:
                             columns["Direction"][index] = [
-                                "Tx" if dir else "Rx" for dir in data["FLX_NullFrame.Dir"].astype("u1").tolist()
+                                "Tx" if dir else "Rx" for dir in astype(data["FLX_NullFrame.Dir"], "u1").tolist()
                             ]
 
                     vals = None
@@ -2202,7 +2204,7 @@ class WithMDIArea:
                 elif data.name == "FLX_Status":
                     index = np.searchsorted(df_index, data.timestamps)
 
-                    vals = data["FLX_Status.StatusType"].astype("u1")
+                    vals = astype(data["FLX_Status.StatusType"], "u1")
                     columns["Details"][index] = vals.astype("U").astype("O")
 
                     columns["Event Type"][index] = "FlexRay Status"
@@ -2366,7 +2368,7 @@ class WithMDIArea:
                                     sys.intern(name)
 
                         if data.name == "LIN_Frame":
-                            vals = data["LIN_Frame.BusChannel"].astype("u1")
+                            vals = astype(data["LIN_Frame.BusChannel"], "u1")
                             vals = [f"LIN {chn}" for chn in vals.tolist()]
                             columns["Bus"] = vals
 
@@ -2390,7 +2392,7 @@ class WithMDIArea:
                                     columns["Direction"] = [v.decode("utf-8") for v in data["LIN_Frame.Dir"].tolist()]
                                 else:
                                     columns["Direction"] = [
-                                        "Tx" if dir else "Rx" for dir in data["LIN_Frame.Dir"].astype("u1").tolist()
+                                        "Tx" if dir else "Rx" for dir in astype(data["LIN_Frame.Dir"], "u1").tolist()
                                     ]
 
                             vals = None
@@ -2400,7 +2402,7 @@ class WithMDIArea:
                             names = set(data.samples.dtype.names)
 
                             if "LIN_SyncError.BusChannel" in names:
-                                vals = data["LIN_SyncError.BusChannel"].astype("u1")
+                                vals = astype(data["LIN_SyncError.BusChannel"], "u1")
                                 vals = [f"LIN {chn}" for chn in vals.tolist()]
                                 columns["Bus"] = vals
 
@@ -2421,7 +2423,7 @@ class WithMDIArea:
                             names = set(data.samples.dtype.names)
 
                             if "LIN_TransmissionError.BusChannel" in names:
-                                vals = data["LIN_TransmissionError.BusChannel"].astype("u1")
+                                vals = astype(data["LIN_TransmissionError.BusChannel"], "u1")
                                 vals = [f"LIN {chn}" for chn in vals.tolist()]
                                 columns["Bus"] = vals
 
@@ -2447,7 +2449,7 @@ class WithMDIArea:
                             names = set(data.samples.dtype.names)
 
                             if "LIN_ReceiveError.BusChannel" in names:
-                                vals = data["LIN_ReceiveError.BusChannel"].astype("u1")
+                                vals = astype(data["LIN_ReceiveError.BusChannel"], "u1")
                                 vals = [f"LIN {chn}" for chn in vals.tolist()]
                                 columns["Bus"] = vals
 
@@ -2475,7 +2477,7 @@ class WithMDIArea:
                             names = set(data.samples.dtype.names)
 
                             if "LIN_ChecksumError.BusChannel" in names:
-                                vals = data["LIN_ChecksumError.BusChannel"].astype("u1")
+                                vals = astype(data["LIN_ChecksumError.BusChannel"], "u1")
                                 vals = [f"LIN {chn}" for chn in vals.tolist()]
                                 columns["Bus"] = vals
 
@@ -2507,7 +2509,8 @@ class WithMDIArea:
 
                             if "LIN_ChecksumError.Dir" in names:
                                 columns["Direction"] = [
-                                    "Tx" if dir else "Rx" for dir in data["LIN_ChecksumError.Dir"].astype("u1").tolist()
+                                    "Tx" if dir else "Rx"
+                                    for dir in astype(data["LIN_ChecksumError.Dir"], "u1").tolist()
                                 ]
 
                             vals = None
@@ -2642,7 +2645,7 @@ class WithMDIArea:
             if not file_info:
                 continue
 
-            file_index, file = file_info
+            _file_index, file = file_info
             origin_mdf = file.mdf.original_name.name
 
             selected_signals = file.mdf.select(
@@ -2673,7 +2676,7 @@ class WithMDIArea:
                 if not file_info:
                     continue
 
-                file_index, file = file_info
+                _file_index, file = file_info
 
                 signals.extend(
                     extract_signals_using_pattern(
@@ -2819,7 +2822,7 @@ class WithMDIArea:
             if not file_info:
                 continue
 
-            file_index, file = file_info
+            _file_index, file = file_info
 
             selected_signals = file.mdf.select(
                 [(entry["name"], entry["group_index"], entry["channel_index"]) for entry in uuids_signals.values()],
@@ -3049,7 +3052,6 @@ class WithMDIArea:
                     events = [bookmark.copy() for bookmark in widget.bookmarks]
                     break
             else:
-
                 events = []
 
                 if self.mdf.version >= "4.00":
@@ -3170,7 +3172,6 @@ class WithMDIArea:
             plot.cursor_moved_signal.connect(self.set_cursor)
             plot.region_removed_signal.connect(self.remove_region)
             plot.region_moved_signal.connect(self.set_region)
-            plot.splitter_moved.connect(self.set_splitter)
 
             for i, mdi in enumerate(self.mdi_area.subWindowList()):
                 widget = mdi.widget()
@@ -3865,7 +3866,6 @@ class WithMDIArea:
             mime_data = None
             for sig in plot_signals.values():
                 sig.ranges = copy_ranges(pattern_info["ranges"])
-            descriptions = {}
 
         else:
             if self.comparison:
@@ -3874,7 +3874,7 @@ class WithMDIArea:
                 mdfs = [self.mdf]
             (
                 mime_data,
-                descriptions,
+                _descriptions,
                 found,
                 not_found,
                 computed,
@@ -4227,7 +4227,6 @@ class WithMDIArea:
             plot.cursor_moved_signal.connect(self.set_cursor)
             plot.region_removed_signal.connect(self.remove_region)
             plot.region_moved_signal.connect(self.set_region)
-            plot.splitter_moved.connect(self.set_splitter)
 
             for i, mdi in enumerate(self.mdi_area.subWindowList()):
                 widget = mdi.widget()
@@ -4620,7 +4619,6 @@ class WithMDIArea:
                     widget.cursor_moved_signal.connect(self.set_cursor)
                     widget.region_removed_signal.connect(self.remove_region)
                     widget.region_moved_signal.connect(self.set_region)
-                    widget.splitter_moved.connect(self.set_splitter)
                 elif widget:
                     widget.timestamp_changed_signal.connect(self.set_cursor)
         else:
@@ -4628,28 +4626,15 @@ class WithMDIArea:
                 widget = mdi.widget()
                 if isinstance(widget, Plot):
                     try:
-                        widget.cursor_moved_signal.disconnect(self.set_cursor)
-                    except:
-                        pass
-                    try:
-                        widget.x_range_changed_signal.disconnect(self.set_x_range)
-                    except:
-                        pass
-                    try:
-                        widget.region_removed_signal.disconnect(self.remove_region)
-                    except:
-                        pass
-                    try:
-                        widget.region_moved_signal.disconnect(self.set_region)
-                    except:
-                        pass
-                    try:
-                        widget.splitter_moved.disconnect(self.set_splitter)
+                        widget.cursor_moved_signal.disconnect()
+                        widget.x_range_changed_signal.disconnect()
+                        widget.region_removed_signal.disconnect()
+                        widget.region_moved_signal.disconnect()
                     except:
                         pass
                 elif widget:
                     try:
-                        widget.timestamp_changed_signal.disconnect(self.set_cursor)
+                        widget.timestamp_changed_signal.disconnect()
                     except:
                         pass
 
@@ -4753,33 +4738,6 @@ class WithMDIArea:
                     wid.plot.region.setRegion(region)
                 except:
                     print(format_exc())
-
-        self._busy = False
-
-    def set_splitter(self, widget, selection_width):
-        if self._busy:
-            return
-        else:
-            self._busy = True
-
-        if not self.subplots_link:
-            self._busy = False
-            return
-
-        if self._splitter_source is None:
-            self._splitter_source = widget
-            for mdi in self.mdi_area.subWindowList():
-                wid = mdi.widget()
-                if isinstance(wid, Plot) and wid is not widget:
-                    if selection_width is not None:
-                        try:
-                            total_size = sum(wid.splitter.sizes())
-                            if total_size > selection_width:
-                                wid.splitter.setSizes([selection_width, total_size - selection_width])
-                        except:
-                            print(format_exc())
-
-            self._splitter_source = None
 
         self._busy = False
 
