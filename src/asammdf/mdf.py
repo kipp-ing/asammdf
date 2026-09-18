@@ -26,7 +26,6 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from canmatrix import CanMatrix
-from lz4.frame import compress as lz_compress
 import numpy as np
 from numpy import (
     frombuffer,
@@ -43,6 +42,7 @@ from .blocks import v2_v3_blocks as v3b
 from .blocks import v2_v3_constants as v3c
 from .blocks import v4_blocks as v4b
 from .blocks import v4_constants as v4c
+from .blocks.compression_utils import decompress, lz_compress
 from .blocks.conversion_utils import from_dict
 from .blocks.cutils import get_channel_raw_bytes_complete
 from .blocks.mdf_common import (
@@ -66,12 +66,12 @@ from .blocks.types import (
 )
 from .blocks.utils import (
     as_non_byte_sized_signed_int,
+    astype,
     ChannelsDB,
     components,
     csv_bytearray2hex,
     csv_int2hex,
     DataBlockInfo,
-    DECOMPRESS_FUNC_MAP,
     downcast,
     FileLike,
     Fragment,
@@ -82,6 +82,7 @@ from .blocks.utils import (
     MDF3_VERSIONS,
     MDF4_VERSIONS,
     MdfException,
+    NamedTemporaryFile,
     plausible_timestamps,
     randomized_string,
     SUPPORTED_VERSIONS,
@@ -425,6 +426,34 @@ class MDF:
         # collected in code like this:
         # MDF(filename).convert('4.10')
         self._mdf._parent = self
+
+        # Copy docstrings for the _mdf methods that are "forwarded" in the MDF class
+        forwarded_methods = [
+            "add_trigger",
+            "append",
+            "attach",
+            "close",
+            "extend",
+            "extract_attachment",
+            "get",
+            "get_bus_signal",
+            "get_can_signal",
+            "get_channel_comment",
+            "get_channel_metadata",
+            "get_channel_name",
+            "get_channel_unit",
+            "get_invalidation_bits",
+            "get_lin_signal",
+            "get_master",
+            "included_channels",
+            "info",
+            "iter_get_triggers",
+            "reload_header",
+            "save",
+        ]
+        for method_name in forwarded_methods:
+            _mdf_method = getattr(self._mdf, method_name, None)
+            getattr(self, method_name).__func__.__doc__ = _mdf_method.__doc__ if _mdf_method else None
 
     def __enter__(self) -> "MDF":
         return self
@@ -1052,13 +1081,71 @@ class MDF:
         """
         version = validate_version_argument(version)
 
-        out = MDF(version=version, **self._mdf._kwargs)
+        if (
+            self.version >= "4.00"
+            and version >= "4.00"
+            and not self._mdf._column_storage
+            and not self._mdf._add_array_components
+        ):
+            out = self._convert_mf4_fast(version, progress)
 
-        out.configure(from_other=self)
+        else:
+            out = MDF(version=version, **self._mdf._kwargs)
 
-        out.header.start_time = self.header.start_time
+            out.configure(from_other=self)
 
-        groups_nr = len(self.virtual_groups)
+            out.header.start_time = self.header.start_time
+
+            groups_nr = len(self.virtual_groups)
+
+            if progress is not None:
+                if callable(progress):
+                    progress(0, groups_nr)
+                else:
+                    progress.signals.setValue.emit(0)
+                    progress.signals.setMaximum.emit(groups_nr)
+
+                    if progress.stop:
+                        raise Terminated
+
+            # walk through all groups and get all channels
+            for i, virtual_group in enumerate(self.virtual_groups):
+                for idx, sigs in enumerate(self._mdf._yield_selected_signals(virtual_group, version=version)):
+                    if idx == 0:
+                        sigs = typing.cast(list[Signal], sigs)
+                        if sigs:
+                            cg = self.groups[virtual_group].channel_group
+                            cg_nr = out.append(
+                                sigs,
+                                common_timebase=True,
+                                comment=cg.comment,
+                            )
+                            MDF._transfer_channel_group_data(out.groups[cg_nr].channel_group, cg)
+                        else:
+                            break
+                    else:
+                        sigs = typing.cast(list[tuple[NDArray[Any], None]], sigs)
+                        out.extend(cg_nr, sigs)
+
+                    if progress and progress.stop:
+                        raise Terminated
+
+                if progress is not None:
+                    if callable(progress):
+                        progress(i + 1, groups_nr)
+                    else:
+                        progress.signals.setValue.emit(i + 1)
+                        progress.signals.setMaximum.emit(groups_nr)
+
+                        if progress.stop:
+                            raise Terminated
+
+        out._transfer_metadata(self, message=f"Converted from {self.name}")
+
+        return out
+
+    def _convert_mf4_fast(self, version: str | Version, progress: Any | None = None) -> "MDF":
+        groups_nr = len(self.groups)
 
         if progress is not None:
             if callable(progress):
@@ -1070,27 +1157,38 @@ class MDF:
                 if progress.stop:
                     raise Terminated
 
-        # walk through all groups and get all channels
-        for i, virtual_group in enumerate(self.virtual_groups):
-            for idx, sigs in enumerate(self._mdf._yield_selected_signals(virtual_group, version=version)):
-                if idx == 0:
-                    sigs = typing.cast(list[Signal], sigs)
-                    if sigs:
-                        cg = self.groups[virtual_group].channel_group
-                        cg_nr = out.append(
-                            sigs,
-                            common_timebase=True,
-                            comment=cg.comment,
-                        )
-                        MDF._transfer_channel_group_data(out.groups[cg_nr].channel_group, cg)
-                    else:
-                        break
-                else:
-                    sigs = typing.cast(list[tuple[NDArray[Any], None]], sigs)
-                    out.extend(cg_nr, sigs)
+        _mapped_file = self._mdf._mapped_file
+        _file = self._mdf._file
+        _tempfile = self._mdf._tempfile
 
-                if progress and progress.stop:
-                    raise Terminated
+        self._mdf._mapped_file = None
+        self._mdf._file = None
+        self._mdf._tempfile = None
+
+        out = deepcopy(self)
+
+        self._mdf._mapped_file = _mapped_file
+        self._mdf._file = _file
+        self._mdf._tempfile = _tempfile
+
+        out._mdf._tempfile = tmp = NamedTemporaryFile(dir=self._mdf.temporary_folder)
+
+        out._mdf.version = version
+        out._mdf.identification = FileIdentificationBlock(version=version)
+
+        for i, gp in enumerate(out.groups):
+            if gp.data_location == v4c.LOCATION_ORIGINAL_FILE:
+                stream = self._mdf._file
+            else:
+                stream = self._mdf._tempfile
+
+            gp.data_location = v4c.LOCATION_TEMPORARY_FILE
+            gp.data_blocks_info_generator = None
+
+            read = stream.read
+            seek = stream.seek
+            write = tmp.write
+            tell = tmp.tell
 
             if progress is not None:
                 if callable(progress):
@@ -1102,7 +1200,24 @@ class MDF:
                     if progress.stop:
                         raise Terminated
 
-        out._transfer_metadata(self, message=f"Converted from {self.name}")
+            for info in gp.data_blocks:
+                seek(info.address)
+                info.address = tell()
+                write(read(info.compressed_size))
+
+                if inv_info := info.invalidation_block:
+                    seek(inv_info.address)
+                    inv_info.address = tell()
+                    write(read(inv_info.compressed_size))
+
+            for signal_blocks in gp.signal_data:
+                if not signal_blocks:
+                    continue
+                for info in signal_blocks:
+                    seek(info.address)
+                    info.address = tell()
+                    info.location = v4c.LOCATION_TEMPORARY_FILE
+                    write(read(info.compressed_size))
 
         return out
 
@@ -1165,6 +1280,15 @@ class MDF:
             version = self.version
         else:
             version = validate_version_argument(version)
+
+        if (
+            self.version >= "4.00"
+            and version >= "4.00"
+            and not self._mdf._column_storage
+            and not self._mdf._add_array_components
+            and all(not gp.uses_ld for gp in self.groups)
+        ):
+            return self._cut_mf4_fast(start, stop, whence, version, include_ends, time_from_zero, progress)
 
         out = MDF(
             version=version,
@@ -1445,7 +1569,6 @@ class MDF:
                 progress.signals.setMaximum.emit(groups_nr)
 
         for i, group in enumerate(self.groups):
-
             channel_group = group.channel_group
             record_size = channel_group.samples_byte_nr + channel_group.invalidation_bytes_nr
 
@@ -1488,8 +1611,7 @@ class MDF:
                 new_data: bytes | memoryview[int] = read(typing.cast(int, compressed_size))
 
                 if block_type:
-                    decompress = DECOMPRESS_FUNC_MAP[block_type]
-                    new_data = decompress(new_data)
+                    new_data = decompress(new_data, block_type, original_size)
 
                     if block_type % 2 == 0:
                         # tranposed data
@@ -1604,6 +1726,268 @@ class MDF:
                         raise Terminated
 
         return self
+
+    def _cut_mf4_fast(
+        self,
+        start: float | None = None,
+        stop: float | None = None,
+        whence: int = 0,
+        version: str | Version | None = None,
+        include_ends: bool = True,
+        time_from_zero: bool = False,
+        progress: Any | None = None,
+    ) -> "MDF":
+        groups_nr = len(self.groups)
+
+        if progress is not None:
+            if callable(progress):
+                progress(0, groups_nr)
+            else:
+                progress.signals.setValue.emit(0)
+                progress.signals.setMaximum.emit(groups_nr)
+
+                if progress.stop:
+                    raise Terminated
+
+        _mapped_file = self._mdf._mapped_file
+        _file = self._mdf._file
+        _tempfile = self._mdf._tempfile
+
+        self._mdf._mapped_file = None
+        self._mdf._file = None
+        self._mdf._tempfile = None
+
+        out = deepcopy(self)
+
+        self._mdf._mapped_file = _mapped_file
+        self._mdf._file = _file
+        self._mdf._tempfile = _tempfile
+
+        out._mdf._tempfile = tmp = NamedTemporaryFile(dir=self._mdf.temporary_folder)
+
+        out._mdf.version = version
+        out._mdf.identification = FileIdentificationBlock(version=version)
+
+        copy_all = start is None and stop is None
+
+        if whence == 1:
+            timestamps: list[float] = []
+            for group in self.virtual_groups:
+                master = self._mdf.get_master(group, record_offset=0, record_count=1)
+                if master.size:
+                    timestamps.append(master[0])
+
+            if timestamps:
+                first_timestamp = np.amin(timestamps)
+            else:
+                first_timestamp = 0
+
+            if start is not None:
+                start += first_timestamp
+            if stop is not None:
+                stop += first_timestamp
+
+        for i, gp in enumerate(out.groups):
+            if gp.data_location == v4c.LOCATION_ORIGINAL_FILE:
+                stream = self._mdf._file
+            else:
+                stream = self._mdf._tempfile
+
+            channel_group = gp.channel_group
+            record_size = channel_group.samples_byte_nr + channel_group.invalidation_bytes_nr
+
+            gp.data_location = v4c.LOCATION_TEMPORARY_FILE
+            gp.data_blocks_info_generator = None
+
+            read = stream.read
+            seek = stream.seek
+            write = tmp.write
+            tell = tmp.tell
+
+            tmp.seek(0, 2)
+
+            if progress is not None:
+                if callable(progress):
+                    progress(i + 1, groups_nr)
+                else:
+                    progress.signals.setValue.emit(i + 1)
+                    progress.signals.setMaximum.emit(groups_nr)
+
+                    if progress.stop:
+                        raise Terminated
+
+            if copy_all:
+                for info in gp.data_blocks:
+                    seek(info.address)
+                    info.address = tell()
+                    write(read(info.compressed_size))
+
+                    if inv_info := info.invalidation_block:
+                        seek(inv_info.address)
+                        inv_info.address = tell()
+                        write(read(inv_info.compressed_size))
+
+                for signal_blocks in gp.signal_data:
+                    if not signal_blocks:
+                        continue
+                    for info in signal_blocks:
+                        seek(info.address)
+                        info.address = tell()
+                        info.location = v4c.LOCATION_TEMPORARY_FILE
+                        write(read(info.compressed_size))
+
+            else:
+                new_blocks = []
+                new_cycles_nr = 0
+
+                for info in gp.data_blocks:
+                    if progress and progress.stop:
+                        raise Terminated
+
+                    (
+                        address,
+                        original_size,
+                        compressed_size,
+                        block_type,
+                        param,
+                        block_limit,
+                    ) = (
+                        info.address,
+                        typing.cast(int, info.original_size),
+                        info.compressed_size,
+                        info.block_type,
+                        info.param,
+                        info.block_limit,
+                    )
+
+                    seek(address)
+                    new_data: bytes | memoryview[int] = read(typing.cast(int, compressed_size))
+
+                    if block_type:
+                        new_data = decompress(new_data, block_type, original_size)
+
+                        if block_type % 2 == 0:
+                            # tranposed data
+                            cols = typing.cast(int, param)
+                            lines = original_size // cols
+                            matrix_size = lines * cols
+
+                            if matrix_size != original_size:
+                                new_data = (
+                                    frombuffer(new_data[:matrix_size], dtype=uint8)
+                                    .reshape((cols, lines))
+                                    .T.ravel()
+                                    .tobytes()
+                                    + new_data[matrix_size:]
+                                )
+                            else:
+                                new_data = frombuffer(new_data, dtype=uint8).reshape((cols, lines)).T.ravel().tobytes()
+
+                    if block_limit is not None:
+                        new_data = new_data[:block_limit]
+
+                    count = len(new_data) // record_size
+
+                    fragment = Fragment(
+                        new_data,
+                        0,
+                        count,
+                        None,
+                    )
+
+                    master = self.get_master(i, data=fragment, one_piece=True)
+
+                    if not len(master):
+                        continue
+
+                    needs_cutting = True
+
+                    if start is None:
+                        start_index = 0
+                        if master[0] > stop:
+                            break
+                        else:
+                            fragment_stop = min(stop, master[-1])
+                            stop_index = np.searchsorted(master, fragment_stop, side="right")
+                            if stop_index == len(master):
+                                needs_cutting = False
+
+                    elif stop is None:
+                        start_index = 0
+                        if master[-1] < start:
+                            continue
+                        else:
+                            fragment_start = max(start, master[0])
+                            start_index = np.searchsorted(master, fragment_start, side="left")
+                            stop_index = len(master)
+                            if start_index == 0:
+                                needs_cutting = False
+                    else:
+                        if master[0] > stop:
+                            break
+                        elif master[-1] < start:
+                            continue
+                        else:
+                            fragment_start = max(start, master[0])
+                            start_index = np.searchsorted(master, fragment_start, side="left")
+                            fragment_stop = min(stop, master[-1])
+                            stop_index = np.searchsorted(master, fragment_stop, side="right")
+                            if start_index == 0 and stop_index == len(master):
+                                needs_cutting = False
+
+                    if needs_cutting:
+                        data = new_data[start_index * record_size : stop_index * record_size]
+                        count = stop_index - start_index
+
+                        raw_size = len(data)
+                        data = lz_compress(data, store_size=True)
+
+                        size = len(data)
+                        data_address = tell()
+                        write(data)
+
+                        info = DataBlockInfo(
+                            address=data_address,
+                            block_type=v4c.DZ_BLOCK_LZ,
+                            original_size=raw_size,
+                            compressed_size=size,
+                            param=0,
+                            location=v4c.LOCATION_TEMPORARY_FILE,
+                        )
+
+                        new_blocks.append(info)
+
+                    else:
+                        seek(info.address)
+                        info.address = tell()
+                        write(read(info.compressed_size))
+
+                        if inv_info := info.invalidation_block:
+                            seek(inv_info.address)
+                            inv_info.address = tell()
+                            write(read(inv_info.compressed_size))
+
+                        new_blocks.append(info)
+
+                    new_cycles_nr += count
+
+                channel_group.cycles_nr = new_cycles_nr
+                gp.data_blocks = new_blocks
+                gp.data_location = v4c.LOCATION_TEMPORARY_FILE
+
+                for signal_blocks in gp.signal_data:
+                    if progress and progress.stop:
+                        raise Terminated
+
+                    if not signal_blocks:
+                        continue
+                    for info in signal_blocks:
+                        seek(info.address)
+                        info.address = tell()
+                        info.location = v4c.LOCATION_TEMPORARY_FILE
+                        write(read(info.compressed_size))
+
+        return out
 
     @overload
     def get(
@@ -3610,9 +3994,9 @@ class MDF:
 
                 if dg_cntr is not None:
                     for index in range(dg_cntr, len(stacked.groups)):
-                        stacked.groups[index].channel_group.comment = (
-                            f'stacked from channel group {i} of "{mdf.name.parent}"'
-                        )
+                        stacked.groups[
+                            index
+                        ].channel_group.comment = f'stacked from channel group {i} of "{mdf.name.parent}"'
 
             if progress is not None:
                 if callable(progress):
@@ -4162,7 +4546,6 @@ class MDF:
                     channels, record_offset, raw, copy_master, ignore_value2text_conversions, record_count, validate
                 )
 
-            grp.load_all_data_blocks()
             blocks = grp.data_blocks
             record_size = grp.channel_group.samples_byte_nr + grp.channel_group.invalidation_bytes_nr
             if not validate_blocks(blocks, record_size):
@@ -6449,7 +6832,7 @@ class MDF:
                                 sys.intern(name)
 
                     if data.name == "CAN_DataFrame":
-                        columns["Bus"] = data["CAN_DataFrame.BusChannel"].astype("u1")
+                        columns["Bus"] = astype(data["CAN_DataFrame.BusChannel"], "u1")
 
                         vals = data["CAN_DataFrame.ID"].astype("u4") & 0x1FFFFFFF
                         columns["ID"] = vals
@@ -6473,20 +6856,20 @@ class MDF:
                                 ]
                             else:
                                 columns["Direction"] = [
-                                    "Tx" if dir else "Rx" for dir in data["CAN_DataFrame.Dir"].astype("u1").tolist()
+                                    "Tx" if dir else "Rx" for dir in astype(data["CAN_DataFrame.Dir"], "u1").tolist()
                                 ]
 
                         if "CAN_DataFrame.ESI" in names:
-                            columns["ESI"] = data["CAN_DataFrame.ESI"].astype("u1")
+                            columns["ESI"] = astype(data["CAN_DataFrame.ESI"], "u1")
 
                         if "CAN_DataFrame.EDL" in names:
-                            columns["EDL"] = data["CAN_DataFrame.EDL"].astype("u1")
+                            columns["EDL"] = astype(data["CAN_DataFrame.EDL"], "u1")
 
                         if "CAN_DataFrame.BRS" in names:
-                            columns["BRS"] = data["CAN_DataFrame.BRS"].astype("u1")
+                            columns["BRS"] = astype(data["CAN_DataFrame.BRS"], "u1")
 
                         if "CAN_DataFrame.IDE" in names:
-                            columns["IDE"] = data["CAN_DataFrame.IDE"].astype("u1")
+                            columns["IDE"] = astype(data["CAN_DataFrame.IDE"], "u1")
 
                     elif data.name == "CAN_RemoteFrame":
                         columns["Bus"] = data["CAN_RemoteFrame.BusChannel"].astype("u1")
@@ -6508,11 +6891,11 @@ class MDF:
                                 ]
                             else:
                                 columns["Direction"] = [
-                                    "Tx" if dir else "Rx" for dir in data["CAN_RemoteFrame.Dir"].astype("u1").tolist()
+                                    "Tx" if dir else "Rx" for dir in astype(data["CAN_RemoteFrame.Dir"], "u1").tolist()
                                 ]
 
                         if "CAN_RemoteFrame.IDE" in names:
-                            columns["IDE"] = data["CAN_RemoteFrame.IDE"].astype("u1")
+                            columns["IDE"] = astype(data["CAN_RemoteFrame.IDE"], "u1")
 
                     elif data.name == "CAN_ErrorFrame":
                         if data.samples.dtype.names is None:
@@ -6521,7 +6904,7 @@ class MDF:
                         names = set(data.samples.dtype.names)
 
                         if "CAN_ErrorFrame.BusChannel" in names:
-                            columns["Bus"] = data["CAN_ErrorFrame.BusChannel"].astype("u1")
+                            columns["Bus"] = astype(data["CAN_ErrorFrame.BusChannel"], "u1")
 
                         if "CAN_ErrorFrame.ID" in names:
                             vals = data["CAN_ErrorFrame.ID"].astype("u4") & 0x1FFFFFFF
@@ -6540,7 +6923,9 @@ class MDF:
                         columns["Event Type"] = "Error Frame"
 
                         if "CAN_ErrorFrame.ErrorType" in names:
-                            error_types = typing.cast(list[int], data["CAN_ErrorFrame.ErrorType"].astype("u1").tolist())
+                            error_types = typing.cast(
+                                list[int], astype(data["CAN_ErrorFrame.ErrorType"], "u1").tolist()
+                            )
                             details = [v4c.CAN_ERROR_TYPES.get(err, "Other error") for err in error_types]
 
                             columns["Details"] = details
@@ -6553,7 +6938,7 @@ class MDF:
                                 ]
                             else:
                                 columns["Direction"] = [
-                                    "Tx" if dir else "Rx" for dir in data["CAN_ErrorFrame.Dir"].astype("u1").tolist()
+                                    "Tx" if dir else "Rx" for dir in astype(data["CAN_ErrorFrame.Dir"], "u1").tolist()
                                 ]
 
                     dfs.append(pd.DataFrame(columns, index=df_index))
@@ -6594,7 +6979,7 @@ class MDF:
                     }
 
                     if data.name == "FLX_Frame":
-                        columns["Bus"] = data["FLX_Frame.FlxChannel"].astype("u1")
+                        columns["Bus"] = astype(data["FLX_Frame.FlxChannel"], "u1")
                         columns["ID"] = data["FLX_Frame.ID"].astype("u2")
                         columns["Cycle"] = data["FLX_Frame.Cycle"].astype("u1")
                         columns["Data Length"] = data["FLX_Frame.DataLength"].astype("u1")
@@ -6616,7 +7001,7 @@ class MDF:
                                 ]
                             else:
                                 columns["Direction"] = [
-                                    "Tx" if dir else "Rx" for dir in data["FLX_Frame.Dir"].astype("u1").tolist()
+                                    "Tx" if dir else "Rx" for dir in astype(data["FLX_Frame.Dir"], "u1").tolist()
                                 ]
 
                         if "FLX_Frame.ControllerFlags" in names:
@@ -6627,7 +7012,7 @@ class MDF:
                             columns["FrameFlags"] = np.frombuffer(data["FLX_Frame.FrameFlags"].tobytes(), dtype="<u4")
 
                     elif data.name == "FLX_NullFrame":
-                        columns["Bus"] = data["FLX_NullFrame.FlxChannel"].astype("u1")
+                        columns["Bus"] = astype(data["FLX_NullFrame.FlxChannel"], "u1")
                         columns["ID"] = data["FLX_NullFrame.ID"].astype("u2")
                         columns["Cycle"] = data["FLX_NullFrame.Cycle"].astype("u1")
 
@@ -6642,7 +7027,7 @@ class MDF:
                                 ]
                             else:
                                 columns["Direction"] = [
-                                    "Tx" if dir else "Rx" for dir in data["FLX_NullFrame.Dir"].astype("u1").tolist()
+                                    "Tx" if dir else "Rx" for dir in astype(data["FLX_NullFrame.Dir"], "u1").tolist()
                                 ]
 
                     elif data.name == "FLX_StartCycle":
@@ -6650,7 +7035,7 @@ class MDF:
                         columns["Event Type"] = "FlexRay StartCycle"
 
                     elif data.name == "FLX_Status":
-                        vals = data["FLX_Status.StatusType"].astype("u1")
+                        vals = astype(data["FLX_Status.StatusType"], "u1")
                         columns["Details"] = vals.astype("U").astype("O")
 
                         columns["Event Type"] = "FlexRay Status"

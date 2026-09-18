@@ -317,8 +317,14 @@ class DataTableModel(QtCore.QAbstractTableModel):
                 return "●"
             elif isinstance(cell, (bytes, np.bytes_)):
                 return cell.decode("utf-8", "replace")
+            elif isinstance(cell, str):
+                return cell
             else:
-                return value_as_str(cell, self.format, None, self.float_precision)
+                if col:
+                    return value_as_str(cell, self.format, cell.dtype, self.float_precision)
+                else:
+                    # always show the timestamps in the physical or ascii modes
+                    return value_as_str(cell, "phys" if self.format != "ascii" else "ascii", None, self.float_precision)
 
         elif role == QtCore.Qt.ItemDataRole.BackgroundRole:
             channel_ranges = self.pgdf.tabular.ranges[name]
@@ -556,12 +562,17 @@ class HeaderModel(QtCore.QAbstractTableModel):
 
                 float_precision = self.pgdf.dataframe_viewer.dataView.model().float_precision
 
-                if np.issubdtype(dtype, np.integer):
-                    return int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-                elif float_precision != -1 and np.issubdtype(dtype, np.floating):
-                    return int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                if isinstance(dtype, np.dtype):
+                    if np.issubdtype(dtype, np.integer):
+                        return int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                    elif float_precision != -1 and np.issubdtype(dtype, np.floating):
+                        return int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                    else:
+                        return int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+
                 else:
-                    return int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                    return QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+
             else:
                 return QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
 

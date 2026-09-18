@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Iterator
 from functools import lru_cache
+import importlib
 import logging
 import mmap
 import multiprocessing
@@ -22,6 +23,7 @@ import xml.etree.ElementTree as ET
 
 from canmatrix.canmatrix import CanMatrix, matrix_class
 import canmatrix.formats
+from chardet import detect
 import numpy as np
 from numpy import arange, bool_, interp, where
 from numpy.typing import NDArray
@@ -46,14 +48,6 @@ from . import v4_constants as v4c
 from .blocks_common import UnpackFrom
 from .options import GLOBAL_OPTIONS
 from .types import StrPath
-
-try:
-    from isal.isal_zlib import decompress as zlib_decompress
-except ImportError:
-    from zlib import decompress as zlib_decompress
-from chardet import detect
-from lz4.frame import decompress as lz_decompress
-from zstd import decompress as zstd_decompress
 
 
 class Terminated(Exception):
@@ -123,17 +117,6 @@ MDF4_VERSIONS: Final[tuple[LiteralString, ...]] = ("4.00", "4.10", "4.11", "4.20
 SUPPORTED_VERSIONS: Final = MDF2_VERSIONS + MDF3_VERSIONS + MDF4_VERSIONS
 
 ALLOWED_MATLAB_CHARS: Final = set(string.ascii_letters + string.digits + "_")
-
-DECOMPRESS_FUNC_MAP = {
-    # data block type
-    v4c.DT_BLOCK: lambda x: x,
-    v4c.DZ_BLOCK_DEFLATE: zlib_decompress,
-    v4c.DZ_BLOCK_TRANSPOSED: zlib_decompress,
-    v4c.DZ_BLOCK_LZ: lz_decompress,
-    v4c.DZ_BLOCK_LZ_TRANSPOSED: lz_decompress,
-    v4c.DZ_BLOCK_ZSTD: zstd_decompress,
-    v4c.DZ_BLOCK_ZSTD_TRANSPOSED: zstd_decompress,
-}
 
 
 class MdfException(Exception):
@@ -1688,12 +1671,11 @@ def pandas_query_compatible(name: str) -> str:
 
     if name.startswith(tuple(string.digits)):
         name = "file_" + name
-    try:
-        exec(f"from pandas import {name}")
-    except ImportError:
-        pass
-    else:
+
+    pandas_module = importlib.import_module("pandas")
+    if hasattr(pandas_module, name):
         name = f"{name}__"
+
     return name
 
 
@@ -2065,3 +2047,31 @@ def validate_blocks(blocks: list[DataBlockInfo], record_size: int) -> bool:
         return False
     else:
         return True
+
+
+def astype(arr, dtype):
+
+    if isinstance(arr, np.ndarray):
+        is_array = True
+    else:
+        is_array = False
+        sig = arr.copy()
+        arr = sig.samples
+
+    conv = None
+    if arr.dtype.metadata:
+        conv = arr.dtype.metadata.get("conversion", None)
+
+    if conv:
+        try:
+            vals = conv.convert(arr).astype(dtype)
+        except:
+            vals = arr.astype(dtype)
+    else:
+        vals = arr.astype(dtype)
+
+    if is_array:
+        return vals
+    else:
+        sig.samples = vals
+        return sig

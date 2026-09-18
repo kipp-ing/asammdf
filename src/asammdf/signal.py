@@ -54,7 +54,6 @@ def convert(arr, ignore_value2text_conversions=False):
         res = res.view(np.lib.format.drop_metadata(res.dtype))
 
     else:
-
         dtype = arr.dtype
         if (metadata := dtype.base.metadata) and "conversion" in metadata:
             conversion = metadata["conversion"]
@@ -178,7 +177,7 @@ class Signal:  # noqa: PLW1641
         **kwargs,
     ) -> None:
         if "raw" in kwargs:
-            warnings.warn("the 'raw' argument for the Signal class has been removed")
+            warnings.warn("the 'raw' argument for the Signal class has been removed", stacklevel=2)
         if not name:
             message = (
                 '"samples", "timestamps" and "name" are mandatory '
@@ -1196,6 +1195,13 @@ class Signal:  # noqa: PLW1641
     def __getitem__(self, val: int | slice | str) -> Union[NDArray[Any], "Signal"]:
         if isinstance(val, str):
             return self.samples[val]
+        elif isinstance(val, int):
+            return Signal(
+                self.samples[val : val + 1],
+                self.timestamps[val : val + 1],
+                invalidation_bits=self.invalidation_bits[val : val + 1] if self.invalidation_bits is not None else None,
+                **self.invariable_attributes(),
+            )
         else:
             return Signal(
                 self.samples[val],
@@ -1279,11 +1285,13 @@ class Signal:  # noqa: PLW1641
         else:
             encoding = None
 
+        samples = samples.view(np.lib.format.drop_metadata(samples.dtype))
+
         return Signal(
             samples,
             self.timestamps.copy() if copy else self.timestamps,
             invalidation_bits=self.invalidation_bits,
-            **self.invariable_attributes(encoding=encoding),
+            **self.invariable_attributes(dropped_attributes=("conversion",), encoding=encoding),
         )
 
     scaled = physical
@@ -1322,7 +1330,7 @@ class Signal:  # noqa: PLW1641
             **self.invariable_attributes(),
         )
 
-    def invariable_attributes(self, **kwargs):
+    def invariable_attributes(self, dropped_attributes=(), **kwargs):
         attrs = {
             "unit": self.unit,
             "name": self.name,
@@ -1341,6 +1349,8 @@ class Signal:  # noqa: PLW1641
             "virtual_master_conversion": self.virtual_master_conversion,
         }
         attrs.update(kwargs)
+        for attr in dropped_attributes:
+            del attrs[attr]
 
         return attrs
 
